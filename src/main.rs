@@ -1,36 +1,45 @@
 use std::fs;
-use std::process::{Command, exit};
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::process::{Command, exit};
 
-use console::Term;
-use dialoguer::{Select, theme::ColorfulTheme};
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyEventKind},
+    execute,
+    style::{Color, Print, ResetColor, SetForegroundColor},
+    terminal::{self, ClearType},
+};
 
 fn get_developer_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join("Developer"))
 }
 
-fn get_projects(developer_path: &PathBuf) -> Vec<String> {
-    let mut projects = Vec::new();
+fn get_directories(path: &PathBuf) -> Vec<String> {
+    let mut dirs = Vec::new();
 
-    if let Ok(entries) = fs::read_dir(developer_path) {
+    if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Some(name) = path.file_name() {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                if let Some(name) = entry_path.file_name() {
                     if let Some(name_str) = name.to_str() {
-                        projects.push(name_str.to_string());
+                        // 隠しディレクトリをスキップ
+                        if !name_str.starts_with('.') {
+                            dirs.push(name_str.to_string());
+                        }
                     }
                 }
             }
         }
     }
 
-    projects.sort();
-    projects
+    dirs.sort();
+    dirs
 }
 
-fn start_tmux_session(project_name: &str, project_path: &PathBuf) -> Result<(), String> {
-    let session_name = project_name.to_lowercase();
+fn start_tmux_session(session_name: &str, project_path: &PathBuf) -> Result<(), String> {
+    let session_name = session_name.to_lowercase();
     let path_str = project_path.to_string_lossy();
 
     // セッションが既に存在するかチェック
@@ -40,7 +49,6 @@ fn start_tmux_session(project_name: &str, project_path: &PathBuf) -> Result<(), 
 
     if let Ok(output) = check {
         if output.status.success() {
-            // 既存セッションにアタッチ
             println!("セッション '{}' は既に存在します。アタッチします...", session_name);
             let status = Command::new("tmux")
                 .args(["attach-session", "-t", &session_name])
@@ -56,12 +64,7 @@ fn start_tmux_session(project_name: &str, project_path: &PathBuf) -> Result<(), 
 
     // 新規セッションをバックグラウンドで作成
     let status = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s", &session_name,
-            "-c", &path_str,
-        ])
+        .args(["new-session", "-d", "-s", &session_name, "-c", &path_str])
         .status()
         .map_err(|e| format!("tmux new-session failed: {}", e))?;
 
@@ -69,14 +72,9 @@ fn start_tmux_session(project_name: &str, project_path: &PathBuf) -> Result<(), 
         return Err("tmux new-session に失敗しました".to_string());
     }
 
-    // 垂直分割（-h は horizontal split = 画面を左右に分割 = 垂直線で分割）
+    // 垂直分割
     let status = Command::new("tmux")
-        .args([
-            "split-window",
-            "-h",
-            "-t", &session_name,
-            "-c", &path_str,
-        ])
+        .args(["split-window", "-h", "-t", &session_name, "-c", &path_str])
         .status()
         .map_err(|e| format!("tmux split-window failed: {}", e))?;
 
@@ -97,7 +95,63 @@ fn start_tmux_session(project_name: &str, project_path: &PathBuf) -> Result<(), 
     Ok(())
 }
 
-fn main() {
+fn shorten_path(path: &PathBuf) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(relative) = path.strip_prefix(&home) {
+            return format!("~/{}", relative.display());
+        }
+    }
+    path.display().to_string()
+}
+
+fn render(
+    stdout: &mut io::Stdout,
+    current_path: &PathBuf,
+    items: &[String],
+    selected: usize,
+) -> io::Result<()> {
+    execute!(stdout, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+
+    // ヘッダー
+    execute!(
+        stdout,
+        SetForegroundColor(Color::Cyan),
+        Print(format!(" {}\n", shorten_path(current_path))),
+        ResetColor,
+        Print(" ─────────────────────────────────────\n"),
+        SetForegroundColor(Color::DarkGrey),
+        Print(" [↑↓] 移動  [Space] 入る  [Enter] TMUX  [←/BS] 戻る  [q] 終了\n"),
+        ResetColor,
+        Print("\n")
+    )?;
+
+    if items.is_empty() {
+        execute!(
+            stdout,
+            SetForegroundColor(Color::DarkGrey),
+            Print("   (サブディレクトリなし)\n"),
+            ResetColor
+        )?;
+    } else {
+        for (i, item) in items.iter().enumerate() {
+            if i == selected {
+                execute!(
+                    stdout,
+                    SetForegroundColor(Color::Green),
+                    Print(format!(" ❯ {}/\n", item)),
+                    ResetColor
+                )?;
+            } else {
+                execute!(stdout, Print(format!("   {}/\n", item)))?;
+            }
+        }
+    }
+
+    stdout.flush()?;
+    Ok(())
+}
+
+fn run() -> io::Result<()> {
     let developer_path = match get_developer_path() {
         Some(path) => path,
         None => {
@@ -111,37 +165,106 @@ fn main() {
         exit(1);
     }
 
-    let projects = get_projects(&developer_path);
+    let mut current_path = developer_path.clone();
+    let mut path_stack: Vec<PathBuf> = vec![];
+    let mut items = get_directories(&current_path);
+    let mut selected: usize = 0;
 
-    if projects.is_empty() {
-        eprintln!("~/Developer にプロジェクトが見つかりません");
-        exit(1);
-    }
+    let mut stdout = io::stdout();
+    terminal::enable_raw_mode()?;
+    execute!(stdout, cursor::Hide)?;
 
-    let term = Term::stderr();
-    let theme = ColorfulTheme::default();
+    let result = (|| -> io::Result<Option<PathBuf>> {
+        loop {
+            render(&mut stdout, &current_path, &items, selected)?;
 
-    let selection = Select::with_theme(&theme)
-        .with_prompt("プロジェクトを選択してください")
-        .items(&projects)
-        .default(0)
-        .interact_on(&term);
+            if let Event::Key(key_event) = event::read()? {
+                if key_event.kind != KeyEventKind::Press {
+                    continue;
+                }
 
-    match selection {
-        Ok(index) => {
-            let project_name = &projects[index];
-            let project_path = developer_path.join(project_name);
+                match key_event.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        return Ok(None);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if !items.is_empty() && selected > 0 {
+                            selected -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if !items.is_empty() && selected < items.len() - 1 {
+                            selected += 1;
+                        }
+                    }
+                    KeyCode::Char(' ') | KeyCode::Right => {
+                        // スペースまたは→: ディレクトリに入る
+                        if !items.is_empty() {
+                            let new_path = current_path.join(&items[selected]);
+                            let new_items = get_directories(&new_path);
+                            if !new_items.is_empty() {
+                                path_stack.push(current_path.clone());
+                                current_path = new_path;
+                                items = new_items;
+                                selected = 0;
+                            }
+                        }
+                    }
+                    KeyCode::Backspace | KeyCode::Left => {
+                        // Backspaceまたは←: 親ディレクトリに戻る
+                        if let Some(prev_path) = path_stack.pop() {
+                            current_path = prev_path;
+                            items = get_directories(&current_path);
+                            selected = 0;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        // Enter: TMUXを起動
+                        if !items.is_empty() {
+                            let project_path = current_path.join(&items[selected]);
+                            return Ok(Some(project_path));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    })();
 
-            println!("選択: {} -> TMUXを起動します...", project_name);
+    // クリーンアップ
+    execute!(stdout, cursor::Show)?;
+    terminal::disable_raw_mode()?;
+    execute!(stdout, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
 
-            if let Err(e) = start_tmux_session(project_name, &project_path) {
+    match result {
+        Ok(Some(project_path)) => {
+            let session_name = project_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("default");
+
+            println!("選択: {} -> TMUXを起動します...", shorten_path(&project_path));
+
+            if let Err(e) = start_tmux_session(session_name, &project_path) {
                 eprintln!("エラー: {}", e);
                 exit(1);
             }
         }
-        Err(_) => {
+        Ok(None) => {
             println!("キャンセルされました");
-            exit(0);
         }
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("エラー: {}", e);
+        exit(1);
     }
 }
