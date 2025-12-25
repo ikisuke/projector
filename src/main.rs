@@ -116,20 +116,20 @@ fn render(
     execute!(
         stdout,
         SetForegroundColor(Color::Cyan),
-        Print(format!(" {}\n", shorten_path(current_path))),
+        Print(format!(" {}\r\n", shorten_path(current_path))),
         ResetColor,
-        Print(" ─────────────────────────────────────\n"),
+        Print(" ─────────────────────────────────────\r\n"),
         SetForegroundColor(Color::DarkGrey),
-        Print(" [↑↓] 移動  [Space] 入る  [Enter] TMUX  [←/BS] 戻る  [q] 終了\n"),
+        Print(" [↑↓] 移動  [Space] 入る  [Enter] TMUX  [←/BS] 戻る  [q] 終了\r\n"),
         ResetColor,
-        Print("\n")
+        Print("\r\n")
     )?;
 
     if items.is_empty() {
         execute!(
             stdout,
             SetForegroundColor(Color::DarkGrey),
-            Print("   (サブディレクトリなし)\n"),
+            Print("   (サブディレクトリなし)\r\n"),
             ResetColor
         )?;
     } else {
@@ -138,11 +138,11 @@ fn render(
                 execute!(
                     stdout,
                     SetForegroundColor(Color::Green),
-                    Print(format!(" ❯ {}/\n", item)),
+                    Print(format!(" ❯ {}/\r\n", item)),
                     ResetColor
                 )?;
             } else {
-                execute!(stdout, Print(format!("   {}/\n", item)))?;
+                execute!(stdout, Print(format!("   {}/\r\n", item)))?;
             }
         }
     }
