@@ -8,7 +8,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
     style::{Color, Print, ResetColor, SetForegroundColor},
-    terminal::{self, ClearType},
+    terminal::{self, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
 fn get_developer_path() -> Option<PathBuf> {
@@ -172,7 +172,7 @@ fn run() -> io::Result<()> {
 
     let mut stdout = io::stdout();
     terminal::enable_raw_mode()?;
-    execute!(stdout, cursor::Hide)?;
+    execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
 
     let result = (|| -> io::Result<Option<PathBuf>> {
         loop {
@@ -232,9 +232,8 @@ fn run() -> io::Result<()> {
     })();
 
     // クリーンアップ
-    execute!(stdout, cursor::Show)?;
+    execute!(stdout, cursor::Show, LeaveAlternateScreen)?;
     terminal::disable_raw_mode()?;
-    execute!(stdout, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
 
     match result {
         Ok(Some(project_path)) => {
